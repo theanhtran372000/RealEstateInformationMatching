@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,3 +29,24 @@ def vertical_crop(img):
         return l_img, r_img
     else:
         return img_cp, img_cp
+    
+def box_crop(img, box):
+    
+    min_x, min_y = [int(x) for x in box[0]]
+    max_x, max_y = [int(x) for x in box[2]]
+
+    subimg = img[min_y:max_y, min_x:max_x]
+
+    return subimg
+    
+def box_crop_and_save(img, boxes, save_dir):
+    
+    subimgs = []
+    for i, box in enumerate(boxes):
+        subimg = box_crop(img, box)
+        subimgs.append(subimg)
+        
+        cv2.imwrite(os.path.join(save_dir, '{}.jpg'.format(str(i).zfill(3))), subimg)
+        
+    return subimgs
+    

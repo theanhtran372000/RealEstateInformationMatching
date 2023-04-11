@@ -148,17 +148,66 @@ def process_group(group):
         [min_x, max_y]
     ]
 
+def sort_boxes_vertical(boxes, h2l=True):
+    return sorted(boxes, key=lambda box: box[0][1], reverse=not h2l)
+
+def sort_boxes_horizontal(boxes, l2r=True):
+    return sorted(boxes, key=lambda box: box[0][0], reverse=not l2r)
+
 def merge_groups(groups):
     merged_boxes = []
     for group in groups:
         merged_boxes.append(process_group(group))
-
+    
+    merged_boxes = sort_boxes_vertical(merged_boxes)
     merged_boxes = np.array(merged_boxes)
     
     return merged_boxes
+
+def get_center(box):
+    min_x, min_y = box[0]
+    max_x, max_y = box[2]
     
+    return [
+        int((max_x + min_x) / 2),
+        int((max_y + min_y) / 2)
+    ]
+
+def merge_lines(boxes):
+    
+    # Group box into lines
+    lines = []
+    for box in boxes:
+        
+        min_x, min_y = box[0]
+        max_x, max_y = box[2]
+        h = max_y - min_y
+        
+        found = False
+        for i, line in enumerate(lines):
+            centers = [get_center(box) for box in line]
+            
+            mean_center = [
+                int(sum([c[0] for c in centers]) / len(centers)),
+                int(sum([c[1] for c in centers]) / len(centers))
+            ]
+            
+            if min_y <= mean_center[1] <= max_y:
+                lines[i].append(box)
+                found = True
+                break
+                
+        if not found:
+            lines.append([box])
+    
+    # Sort lines
+    for i, line in enumerate(lines):
+        lines[i] = sort_boxes_horizontal(line)
+        
+    return lines
     
 def merge_boxes(boxes):
     groups = group_boxes(boxes)
     boxes = merge_groups(groups)
-    return boxes
+    lines = merge_lines(boxes)
+    return boxes, lines

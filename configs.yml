@@ -1,0 +1,18 @@
+# OpenAI API
+openai:
+    api_key: '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'
+
+# OCR Model
+vietocr:
+    device: 'cuda:0'
+
+ocr_correction:
+    weight_path: 'VietnameseOcrCorrection/weights/seq2seq_0.pth'
+    model_type: 'seq2seq'
+    device: 'cuda:0'
+    
+# Prompt configs
+prompt:
+    correction: 'assets/promts/correction_prompt.txt'
+    extraction: 'assets/promts/extraction_prompt.txt'
+    

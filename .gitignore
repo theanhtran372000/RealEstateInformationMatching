@@ -1,4 +1,4 @@
 .ipynb_checkpoints
 *.onnx
-*.pth
 assets
+__pycache__
