@@ -1,6 +1,6 @@
 # OpenAI API
 openai:
-    api_key: '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'
+    key_path: 'assets/openai/premium_key2.txt'
 
 # OCR Model
 vietocr:
@@ -16,3 +16,8 @@ prompt:
     correction: 'assets/promts/correction_prompt.txt'
     extraction: 'assets/promts/extraction_prompt.txt'
     
+# Parameters
+process:
+    box_padding:
+        w: 0 # px
+        h: 2 # px

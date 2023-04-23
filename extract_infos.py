@@ -5,14 +5,14 @@ import sys
 sys.path.append(os.path.abspath(os.path.join('PaddleOCR', 'tools', 'infer')))
 sys.path.insert(0, os.path.abspath('PaddleOCR'))
 
-sys.path.insert(0, os.path.abspath('VietnameseOcrCorrection'))
+# sys.path.insert(0, os.path.abspath('VietnameseOcrCorrection'))
 
 os.environ["FLAGS_allocator_strategy"] = 'auto_growth'
+os.environ['CURL_CA_BUNDLE'] = ''
 
 # Import libs
 import cv2
 import time
-import sys
 import yaml
 import json
 import openai
@@ -25,10 +25,21 @@ from ppocr.utils.utility import get_image_file_list, check_and_read
 from ppocr.data import create_operators, transform
 from ppocr.postprocess import build_post_process
 
-from utils import box_crop_and_save, vertical_crop, box_crop
+from utils import vertical_crop
+from utils import VietOCR
+from utils import pad_boxes
+from utils import save_cv2_img
+
+# Old version merge
+from utils import box_crop_and_save, box_crop
 from utils import generate_prompt, get_chatgpt_answer
 from utils import merge_boxes
-from utils import VietOCR
+
+# New version merge
+from utils import group_boxes_v2
+from utils import extract_groups
+from utils import draw_polygons
+
 # from utils import OCRCorrection
 
 logger = get_logger()
@@ -271,7 +282,8 @@ class TextDetector(object):
         dt_boxes = post_result[0]['points']
 
         if self.args.det_box_type == 'poly':
-            dt_boxes = self.filter_tag_det_res_only_clip(dt_boxes, ori_im.shape)
+            dt_boxes = self.filter_tag_det_res_only_clip(
+                dt_boxes, ori_im.shape)
         else:
             dt_boxes = self.filter_tag_det_res(dt_boxes, ori_im.shape)
 
@@ -283,20 +295,20 @@ class TextDetector(object):
 
 if __name__ == "__main__":
     args = utility.parse_args()
-    
+
     # Prepare env
     logger.info('Prepare environment')
     image_file_list = get_image_file_list(args.image_dir)
     draw_img_save_dir = args.draw_img_save_dir
     os.makedirs(draw_img_save_dir, exist_ok=True)
-    
+
     # Read configs
     with open('configs.yml', 'r') as f:
         configs = yaml.load(f, yaml.FullLoader)
-    
+
     # Config ChatGPT
-    openai.api_key = configs['openai']['api_key']
-    
+    openai.api_key = open(configs['openai']['key_path'], 'r').read().strip()
+
     # Prepare model
     logger.info('Prepare model')
     text_detector = TextDetector(args)
@@ -306,26 +318,35 @@ if __name__ == "__main__":
     #     configs['ocr_correction']['model_type'],
     #     configs['ocr_correction']['device']
     # )
-    
+
     # Warmup model
     if args.warmup:
         img = np.random.uniform(0, 255, [640, 640, 3]).astype(np.uint8)
         for i in range(2):
             res = text_detector(img)
-    
+
     # Loop through all test images
     total_time = 0
     save_results = []
     for idx, image_file in enumerate(image_file_list):
         
+        if os.path.isdir(image_file):
+            continue
+        
+        print('=' * 5, 'Processing image {}'.format(image_file), '=' * 5)
+        
+        image_name = image_file.split('/')[-1].split('.')[0]
+        save_dir = os.path.join(draw_img_save_dir, image_name)
+        os.makedirs(save_dir, exist_ok=True)
+
         # Check image file is multipage or not
         img, flag_gif, flag_pdf = check_and_read(image_file)
         if not flag_gif and not flag_pdf:
             img = cv2.imread(image_file)
-            
+
             # === Crop image === #
             l_img, r_img = vertical_crop(img)
-            
+
         if not flag_pdf:
             if l_img is None:
                 logger.debug("error in loading image:{}".format(image_file))
@@ -336,9 +357,10 @@ if __name__ == "__main__":
             if page_num > len(img) or page_num == 0:
                 page_num = len(img)
             imgs = img[:page_num]
-            
+
         # Foreach page
         for index, img in enumerate(imgs):
+            h, w, _ = img.shape
             
             # === Text Detection === #
             # Detect boxes
@@ -346,20 +368,21 @@ if __name__ == "__main__":
             dt_boxes, _ = text_detector(img)
             elapse = time.time() - st
             total_time += elapse
-            
+
             # Log results
             # logger.info(save_pred)
             if len(imgs) > 1:
                 logger.info("{}_{} The predict time of {}: {}".format(
                     idx, index, image_file, elapse))
             else:
-                logger.info("The predict time of {}: {:.2f}s".format(image_file, elapse))
-            
+                logger.info("The predict time of {}: {:.2f}s".format(
+                    image_file, elapse))
+
             logger.info('Found {} boxes!'.format(len(dt_boxes)))
-            
+
             # Draw boxes on image
-            src_im = utility.draw_text_det_res(dt_boxes, img.copy())
-            
+            raw_img = utility.draw_text_det_res(dt_boxes, img.copy())
+
             # Save images
             if flag_gif:
                 save_file = image_file[:-3] + "png"
@@ -368,17 +391,11 @@ if __name__ == "__main__":
                                                '_' + str(index) + '.png')
             else:
                 save_file = image_file
-            img_path = os.path.join(
-                draw_img_save_dir,
-                "det_raw_{}".format(os.path.basename(save_file)))
-            cv2.imwrite(img_path, src_im)
-            logger.info("The visualized image saved in {}".format(img_path))
+            raw_path = os.path.join(save_dir, "det_raw.jpg")
+            save_cv2_img(raw_img, raw_path)
+            logger.info("The raw detection image saved in {}".format(raw_path))
             
-            # === Postprocess boxes === #
-            # Merge boxes
-            dt_boxes, lines = merge_boxes(dt_boxes)
-            
-            logger.info('Merge down to {} lines, contains {} boxes!'.format(len(lines), len(dt_boxes)))
+            # time.sleep(1)
             
             # Save results
             if len(imgs) > 1:
@@ -390,103 +407,175 @@ if __name__ == "__main__":
                     json.dumps([x.tolist() for x in dt_boxes])) + "\n"
             save_results.append(save_pred)
             
-            # Crop text
-            crop_text_save_dir = os.path.join(draw_img_save_dir, 'subimgs')
+            # Box padding
+            pad = configs['process']['box_padding']
+            dt_boxes = pad_boxes(dt_boxes, w, h, pad['w'], pad['h'])
+
+            # === Postprocess boxes === #
+#             # Merge boxes v1
+#             dt_boxes, lines = merge_boxes(dt_boxes)
+
+#             logger.info('Merge down to {} lines, contains {} boxes!'.format(
+#                 len(lines), len(dt_boxes)))
+
+#             # Crop text
+#             crop_text_save_dir = os.path.join(save_dir, 'subimgs')
+#             os.makedirs(crop_text_save_dir, exist_ok=True)
+#             box_crop_and_save(img, dt_boxes, crop_text_save_dir)
+#             logger.info(
+#                 'All sub-images saved to {}!'.format(crop_text_save_dir))
+
+#             # Draw boxes on image
+#             src_im = utility.draw_text_det_res(dt_boxes, img.copy())
+
+#             # Save images
+#             if flag_gif:
+#                 save_file = image_file[:-3] + "png"
+#             elif flag_pdf:
+#                 save_file = image_file.replace('.pdf',
+#                                                '_' + str(index) + '.png')
+#             else:
+#                 save_file = image_file
+#             merge_path = os.path.join(save_dir, "det_merged.jpg")
+#             cv2.imwrite(merge_path, src_im)
+#             logger.info("The visualized image saved in {}".format(merge_path))
+
+            # Merge boxes v2
+            groups = group_boxes_v2(dt_boxes, thresh=0.6)
+            lines = extract_groups(groups, img)
+            
+            logger.info('Merge down to {} groups, contained in {} lines!'.format(len(groups), len(lines)))
+            
+            # Save image
+            merge_img = draw_polygons(img, lines)
+            merge_path = os.path.join(save_dir, "det_merged.jpg")
+            save_cv2_img(merge_img, merge_path)
+            logger.info("The merged detection image saved in {}".format(merge_path))
+            
+            # time.sleep(1)
+            
+            # Save all subimgs
+            crop_text_save_dir = os.path.join(save_dir, 'subimgs')
             os.makedirs(crop_text_save_dir, exist_ok=True)
-            box_crop_and_save(img, dt_boxes, crop_text_save_dir)
-            logger.info('All sub-images saved to {}!'.format(crop_text_save_dir))
+            i = 0
+            for line in lines:
+                for result in line:
+                    subimg = result[0]
+                    cv2.imwrite(
+                        os.path.join(crop_text_save_dir, '{}.jpg'.format(str(i).zfill(3))),
+                        subimg
+                    )
+                    i += 1
+                
+            logger.info("All crop subimgs saved in {}".format(crop_text_save_dir))
             
-            # Draw boxes on image
-            src_im = utility.draw_text_det_res(dt_boxes, img.copy())
-            
-            # Save images
-            if flag_gif:
-                save_file = image_file[:-3] + "png"
-            elif flag_pdf:
-                save_file = image_file.replace('.pdf',
-                                               '_' + str(index) + '.png')
-            else:
-                save_file = image_file
-            img_path = os.path.join(
-                draw_img_save_dir,
-                "det_merged_{}".format(os.path.basename(save_file)))
-            cv2.imwrite(img_path, src_im)
-            logger.info("The visualized image saved in {}".format(img_path))
+            # time.sleep(1)
             
             # === OCR === #
             # Perform OCR to extract text
             logger.info('Extracting text using VietOCR ...')
             since = time.time()
+            
+            # For merge v1
+#             all_texts = []
+#             for i, line in enumerate(lines):
+
+#                 text_in_line = []
+#                 for box in line:
+#                     subimg = box_crop(img, box)
+#                     subimg = Image.fromarray(subimg)
+
+#                     t = predictor(subimg)
+
+#                     text_in_line.append(t)
+
+#                 line_text = ' '.join(text_in_line)
+#                 all_texts.append(line_text)
+#                 logger.info('[{}] Line: {}'.format(i + 1, line_text))
+            
+            # For merge v2
             all_texts = []
             for i, line in enumerate(lines):
                 
                 text_in_line = []
-                for box in line:
-                    subimg = box_crop(img, box)
+                for result in line:
+                    subimg = result[0]
                     subimg = Image.fromarray(subimg)
-                    
+
                     t = predictor(subimg)
                     
                     text_in_line.append(t)
-                
+                    
                 line_text = ' '.join(text_in_line)
                 all_texts.append(line_text)
+                
                 logger.info('[{}] Line: {}'.format(i + 1, line_text))
-            
+
             raw_text = '\n'.join(all_texts)
-            text_path = os.path.join(draw_img_save_dir, 'text_raw.txt')
+            text_path = os.path.join(save_dir, 'text_raw.txt')
             with open(text_path, 'w') as f:
                 f.write(raw_text)
             logger.info('Done after {:.2f}s!'.format(time.time() - since))
             logger.info('Raw text: \n {}'.format(raw_text))
             logger.info('Raw texts saved to {}!'.format(text_path))
-            
+
 #             # OCR Correction with Seq2Seq
 #             since = time.time()
-            
+
 #             corrected_texts = []
 #             for i, text in enumerate(all_texts):
 #                 out = corrector(text)
 #                 corrected_texts.append(out)
 #                 logger.info('[{}] Corrected line: {}'.format(i + 1, out))
-            
+
 #             final_text = '\n'.join(corrected_texts)
 #             logger.info('Done after {:.2f}s!'.format(time.time() - since))
 #             logger.info('Final text: \n {}'.format(final_text))
-            
+
             # === OCR Correction with ChatGPT === #
             since = time.time()
+        
             logger.info('Correcting text using ChatGPT ...')
-            correction_prompt = generate_prompt(configs['prompt']['correction'], raw_text)
+            correction_prompt = generate_prompt(
+                configs['prompt']['correction'], raw_text)
+            logger.info('Prompt: {}'.format(correction_prompt))
+            
             final_text = get_chatgpt_answer(correction_prompt)
             logger.info('Done after {:.2f}s!'.format(time.time() - since))
             logger.info('Final text: \n {}'.format(final_text))
-            
+
             # Save text
-            text_path = os.path.join(draw_img_save_dir, 'text_final.txt')
+            text_path = os.path.join(save_dir, 'text_final.txt')
             with open(text_path, 'w') as f:
                 f.write(final_text)
             logger.info('Final texts saved to {}!'.format(text_path))
-            
+
             # === Information extraction with ChatGPT === #
             since = time.time()
             logger.info('Extracting information using ChatGPT ...')
-            extraction_prompt = generate_prompt(configs['prompt']['extraction'], final_text)
+            extraction_prompt = generate_prompt(
+                configs['prompt']['extraction'], final_text)
+            logger.info('Prompt: {}'.format(extraction_prompt))
+            
             extracted_infos = get_chatgpt_answer(extraction_prompt)
             logger.info('Done after {:.2f}s!'.format(time.time() - since))
             logger.info('Information: \n {}'.format(extracted_infos))
-            
+
             # Save text
-            text_path = os.path.join(draw_img_save_dir, 'infos.json')
+            text_path = os.path.join(save_dir, 'infos.json')
             with open(text_path, 'w') as f:
                 f.write(extracted_infos)
             logger.info('Extracted information saved to {}!'.format(text_path))
-            
+
             # === Real estate shape extraction === #
             # ...
+            # For future development
 
-    with open(os.path.join(draw_img_save_dir, "det_results.txt"), 'w') as f:
-        f.writelines(save_results)
-        f.close()
+        with open(os.path.join(save_dir, "det_results.txt"), 'w') as f:
+            f.writelines(save_results)
+            f.close()
+            
+        print()
+        
     if args.benchmark:
         text_detector.autolog.report()
